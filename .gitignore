@@ -1,0 +1,5 @@
+# WeChat DevTools local preferences
+project.private.config.json
+
+# OS metadata
+.DS_Store

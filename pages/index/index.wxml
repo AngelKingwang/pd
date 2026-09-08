@@ -1,0 +1,64 @@
+<view class="page">
+  <!-- 图片展示区 -->
+  <view class="canvas-wrap" style="height: {{canvasHeight}}px">
+    <canvas
+      type="2d"
+      id="mainCanvas"
+      class="main-canvas"
+      disable-scroll="{{true}}"
+      bindtouchstart="onTouchStart"
+      bindtouchmove="onTouchMove"
+      bindtouchend="onTouchEnd"
+      bindtouchcancel="onTouchEnd"
+    ></canvas>
+
+    <view class="import-btn" bindtap="chooseImage">导入图片</view>
+
+    <view class="zoom-btns" wx:if="{{hasImage && !cropMode}}">
+      <view class="zoom-btn" bindtap="zoomIn">+</view>
+      <view class="zoom-btn" bindtap="zoomOut">−</view>
+      <view class="zoom-btn fit" bindtap="fitView">适配</view>
+    </view>
+
+    <view class="empty-tip" wx:if="{{!hasImage}}">
+      <view class="empty-text">点击右上角「导入图片」</view>
+      <view class="empty-sub">支持十字绣 / 拼豆图纸</view>
+    </view>
+
+    <view class="crop-tip" wx:if="{{cropMode}}">拖动调整裁剪框，裁掉色卡和边缘数字，再点「完成裁剪」</view>
+  </view>
+
+  <!-- 工具栏 -->
+  <view class="toolbar" wx:if="{{hasImage}}">
+    <view class="tool-btn {{cropMode ? 'active' : ''}}" bindtap="toggleCrop">{{cropMode ? '完成裁剪' : '裁剪'}}</view>
+    <view class="tool-btn" bindtap="autoGrid">自动网格</view>
+    <view class="grid-input">
+      <text>列</text>
+      <input type="number" value="{{gridCols}}" bindblur="onColsBlur" />
+      <text>行</text>
+      <input type="number" value="{{gridRows}}" bindblur="onRowsBlur" />
+    </view>
+    <view class="tool-btn" bindtap="reExtract">重新取色</view>
+  </view>
+
+  <view class="info-bar" wx:if="{{hasImage}}">
+    {{gridCols}} × {{gridRows}} 格 · {{palette.length}} 种颜色{{selectedColor !== null ? ' · 已选中 ' + palette[selectedColor].num + ' 号色' : ''}}
+  </view>
+
+  <!-- 颜色块列表 -->
+  <scroll-view scroll-x enhanced show-scrollbar="{{false}}" class="palette" wx:if="{{palette.length}}">
+    <view class="palette-inner">
+      <view
+        class="palette-item {{selectedColor === index ? 'selected' : ''}}"
+        wx:for="{{palette}}"
+        wx:key="num"
+        data-idx="{{index}}"
+        bindtap="onColorTap"
+      >
+        <text class="palette-num">{{item.num}}</text>
+        <view class="palette-block" style="background: {{item.css}}"></view>
+        <text class="palette-count">{{item.count}}格</text>
+      </view>
+    </view>
+  </scroll-view>
+</view>
