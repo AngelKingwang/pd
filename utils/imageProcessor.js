@@ -1,12 +1,10 @@
 /**
- * 图像处理模块：网格自动检测 + 颜色提取聚类
- * 针对十字绣/拼豆图纸：图上有规律网格线（每格细线、每10格粗线）
+ * 图像处理模块：网格自动检测（含四周数字定位）+ 颜色提取聚类
+ * 针对十字绣/拼豆图纸：图上有规律网格线，四周边距常有每10格的数字标记
  */
 
 /**
  * 分析一个方向上的暗度投影，找出网格线的间距与偏移
- * @param {Float32Array} proj 每个像素位置的暗度累加值
- * @returns {{gap:number, offset:number}|null}
  */
 function analyzeProjection(proj) {
   const n = proj.length
@@ -61,12 +59,197 @@ function analyzeProjection(proj) {
   }
   let offset = Math.round(offsetSum / peaks.length)
   offset = ((offset % bestGap) + bestGap) % bestGap
-  return { gap: bestGap, offset }
+
+  return {
+    gap: bestGap,
+    offset,
+    peaks,
+    firstPeak: peaks[0],
+    lastPeak: peaks[peaks.length - 1]
+  }
 }
 
 /**
- * 自动检测图纸网格
- * @param {ImageData} imageData
+ * 在估计值附近微调偏移和间距，使网格线位置暗度最大（亚像素级对齐）
+ */
+function refineProjection(proj, info) {
+  let bestScore = -1
+  let bestOffset = info.offset
+  let bestGap = info.gap
+  for (let dg = -1; dg <= 1; dg += 0.5) {
+    const gap = info.gap + dg
+    if (gap < 3) continue
+    for (let doff = -3; doff <= 3; doff++) {
+      const offset = info.offset + doff
+      let sum = 0
+      let count = 0
+      for (let x = offset; x < proj.length; x += gap) {
+        const xi = Math.round(x)
+        if (xi >= 0 && xi < proj.length) {
+          sum += proj[xi]
+          count++
+        }
+      }
+      const score = count ? sum / count : 0
+      if (score > bestScore) {
+        bestScore = score
+        bestOffset = offset
+        bestGap = gap
+      }
+    }
+  }
+  info.offset = bestOffset
+  info.gap = bestGap
+}
+
+/**
+ * 在投影中找出连续暗区的加权中心（用于定位边距中的数字）
+ */
+function findBlobCenters(proj, gap) {
+  const n = proj.length
+  let max = 0
+  let sum = 0
+  for (let i = 0; i < n; i++) {
+    sum += proj[i]
+    if (proj[i] > max) max = proj[i]
+  }
+  if (max <= 0) return []
+  const mean = sum / n
+  const th = mean + (max - mean) * 0.45
+
+  // 连续超阈值区段
+  const regions = []
+  let start = -1
+  for (let i = 0; i < n; i++) {
+    if (proj[i] > th) {
+      if (start < 0) start = i
+    } else if (start >= 0) {
+      regions.push([start, i - 1])
+      start = -1
+    }
+  }
+  if (start >= 0) regions.push([start, n - 1])
+
+  // 合并距离过近的区段（同一个多位数字的多个笔画/数位）
+  const merged = []
+  for (const r of regions) {
+    const last = merged[merged.length - 1]
+    if (last && r[0] - last[1] < gap * 1.2) {
+      last[1] = r[1]
+    } else {
+      merged.push([r[0], r[1]])
+    }
+  }
+
+  // 加权中心，过滤过宽区域（不太可能是数字）
+  const centers = []
+  for (const [a, b] of merged) {
+    if (b - a > gap * 4) continue
+    let ws = 0
+    let wsum = 0
+    for (let i = a; i <= b; i++) {
+      ws += proj[i] * i
+      wsum += proj[i]
+    }
+    if (wsum > 0) centers.push(ws / wsum)
+  }
+  return centers
+}
+
+/**
+ * 根据一组标记位置（数字中心或粗线）投票决定 10 格实线的相位
+ * @returns {number|null} 需要应用到索引上的位移 s（0-9），null 表示无法确定
+ */
+function votePhase(centers, offset, gap) {
+  if (!centers || centers.length < 2) return null
+  // 校验存在 ≈10格 整数倍的间距（数字/粗线应每10格出现一次）
+  let ok = false
+  for (let i = 1; i < centers.length; i++) {
+    const d = centers[i] - centers[i - 1]
+    const k = Math.round(d / (10 * gap))
+    if (k >= 1 && Math.abs(d - k * 10 * gap) < gap * 1.5) {
+      ok = true
+      break
+    }
+  }
+  if (!ok) return null
+
+  const votes = new Map()
+  for (const c of centers) {
+    const idx = Math.round((c - offset) / gap)
+    const m = ((idx % 10) + 10) % 10
+    const s = (10 - m) % 10
+    votes.set(s, (votes.get(s) || 0) + 1)
+  }
+  let bestS = null
+  let bestN = 0
+  votes.forEach((n, s) => {
+    if (n > bestN) {
+      bestN = n
+      bestS = s
+    }
+  })
+  return bestS
+}
+
+/**
+ * 备用方案：用网格线中的粗线（每10格一条）确定相位
+ */
+function boldLinePhase(proj, peaks, offset, gap) {
+  if (!peaks || peaks.length < 3) return null
+  let max = 0
+  let sum = 0
+  for (const p of peaks) {
+    sum += proj[p]
+    if (proj[p] > max) max = proj[p]
+  }
+  const mean = sum / peaks.length
+  const th = mean + (max - mean) * 0.45
+  const bold = peaks.filter((p) => proj[p] >= th)
+  return votePhase(bold, offset, gap)
+}
+
+/**
+ * 检测四周边距中的数字位置，确定 10 格实线相位
+ * @param axis 'x' 检测上下边距的数字（决定竖线相位），'y' 检测左右边距
+ */
+function detectNumberPhase(imageData, info, crossInfo, axis) {
+  const { width, height, data } = imageData
+  const crossLen = axis === 'x' ? height : width
+  const len = axis === 'x' ? width : height
+
+  // 边距区域：网格线之外的部分（数字一般印在这里）
+  const ranges = []
+  if (crossInfo.firstPeak > 4) ranges.push([0, crossInfo.firstPeak])
+  const tailStart = crossInfo.lastPeak + 1
+  if (crossLen - tailStart > 4) ranges.push([tailStart, crossLen])
+  if (!ranges.length) return null
+
+  const proj = new Float32Array(len)
+  const step = 2
+  for (const [r0, r1] of ranges) {
+    for (let a = r0; a < r1; a += step) {
+      if (axis === 'x') {
+        let i = a * width * 4
+        for (let x = 0; x < width; x += step) {
+          proj[x] += 255 - (0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2])
+          i += step * 4
+        }
+      } else {
+        for (let y = 0; y < height; y += step) {
+          const i = (y * width + a) * 4
+          proj[y] += 255 - (0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2])
+        }
+      }
+    }
+  }
+
+  const centers = findBlobCenters(proj, info.gap)
+  return votePhase(centers, info.offset, info.gap)
+}
+
+/**
+ * 自动检测图纸网格（含四周数字定位 10 格实线相位）
  * @returns {{cellW:number, cellH:number, offsetX:number, offsetY:number, cols:number, rows:number}|null}
  */
 function detectGrid(imageData) {
@@ -75,7 +258,7 @@ function detectGrid(imageData) {
   const colDark = new Float32Array(width)
   const rowDark = new Float32Array(height)
   for (let y = 0; y < height; y += step) {
-    let i = (y * width) * 4
+    let i = y * width * 4
     for (let x = 0; x < width; x += step) {
       const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
       const dark = 255 - lum
@@ -88,8 +271,20 @@ function detectGrid(imageData) {
   const yInfo = analyzeProjection(rowDark)
   if (!xInfo || !yInfo) return null
 
-  const cols = Math.round((width - xInfo.offset) / xInfo.gap)
-  const rows = Math.round((height - yInfo.offset) / yInfo.gap)
+  // 精修对齐
+  refineProjection(colDark, xInfo)
+  refineProjection(rowDark, yInfo)
+
+  // 根据四周数字确定 10 格实线相位；失败则用粗线兜底
+  let sx = detectNumberPhase(imageData, xInfo, yInfo, 'x')
+  if (sx === null) sx = boldLinePhase(colDark, xInfo.peaks, xInfo.offset, xInfo.gap)
+  let sy = detectNumberPhase(imageData, yInfo, xInfo, 'y')
+  if (sy === null) sy = boldLinePhase(rowDark, yInfo.peaks, yInfo.offset, yInfo.gap)
+  if (sx) xInfo.offset -= sx * xInfo.gap
+  if (sy) yInfo.offset -= sy * yInfo.gap
+
+  const cols = Math.max(1, Math.round((width - xInfo.offset) / xInfo.gap))
+  const rows = Math.max(1, Math.round((height - yInfo.offset) / yInfo.gap))
   if (cols < 2 || rows < 2 || cols > 500 || rows > 500) return null
 
   return {
@@ -100,6 +295,18 @@ function detectGrid(imageData) {
     cols,
     rows
   }
+}
+
+/**
+ * 网格区域在图片中的包围盒（用于自动裁掉四周数字和色卡）
+ */
+function gridBBox(grid, width, height) {
+  const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v)
+  const x0 = clamp(Math.round(grid.offsetX), 0, width)
+  const y0 = clamp(Math.round(grid.offsetY), 0, height)
+  const x1 = clamp(Math.round(grid.offsetX + grid.cols * grid.cellW), 0, width)
+  const y1 = clamp(Math.round(grid.offsetY + grid.rows * grid.cellH), 0, height)
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
 }
 
 /**
@@ -137,9 +344,6 @@ const MAX_COLORS = 80
 
 /**
  * 按网格提取每格颜色并聚类编号
- * @param {ImageData} imageData
- * @param {{cellW:number, cellH:number, offsetX:number, offsetY:number, cols:number, rows:number}} grid
- * @returns {{palette:Array, cellMap:Int16Array, cols:number, rows:number}}
  */
 function extractColors(imageData, grid) {
   const { width, height, data } = imageData
@@ -235,5 +439,6 @@ function extractColors(imageData, grid) {
 
 module.exports = {
   detectGrid,
+  gridBBox,
   extractColors
 }

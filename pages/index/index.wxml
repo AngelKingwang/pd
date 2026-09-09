@@ -10,28 +10,27 @@
       bindtouchmove="onTouchMove"
       bindtouchend="onTouchEnd"
       bindtouchcancel="onTouchEnd"
-    ></canvas>
+    >
+      <!-- canvas 是原生组件，按钮用 cover-view 放在其内部才不会被遮挡 -->
+      <cover-view class="import-btn" bindtap="chooseImage">导入图片</cover-view>
 
-    <view class="import-btn" bindtap="chooseImage">导入图片</view>
+      <cover-view class="zoom-btns" wx:if="{{hasImage && !cropMode}}">
+        <cover-view class="zoom-btn" bindtap="zoomIn">+</cover-view>
+        <cover-view class="zoom-btn" bindtap="zoomOut">−</cover-view>
+        <cover-view class="zoom-btn fit" bindtap="fitView">适配</cover-view>
+      </cover-view>
 
-    <view class="zoom-btns" wx:if="{{hasImage && !cropMode}}">
-      <view class="zoom-btn" bindtap="zoomIn">+</view>
-      <view class="zoom-btn" bindtap="zoomOut">−</view>
-      <view class="zoom-btn fit" bindtap="fitView">适配</view>
-    </view>
+      <cover-view class="empty-tip" wx:if="{{!hasImage}}">点击右上角「导入图片」，支持十字绣 / 拼豆图纸</cover-view>
 
-    <view class="empty-tip" wx:if="{{!hasImage}}">
-      <view class="empty-text">点击右上角「导入图片」</view>
-      <view class="empty-sub">支持十字绣 / 拼豆图纸</view>
-    </view>
-
-    <view class="crop-tip" wx:if="{{cropMode}}">拖动调整裁剪框，裁掉色卡和边缘数字，再点「完成裁剪」</view>
+      <cover-view class="crop-tip" wx:if="{{cropMode}}">拖动调整裁剪框，裁掉色卡和边缘数字，再点「完成裁剪」</cover-view>
+    </canvas>
   </view>
 
   <!-- 工具栏 -->
   <view class="toolbar" wx:if="{{hasImage}}">
     <view class="tool-btn {{cropMode ? 'active' : ''}}" bindtap="toggleCrop">{{cropMode ? '完成裁剪' : '裁剪'}}</view>
     <view class="tool-btn" bindtap="autoGrid">自动网格</view>
+    <view class="tool-btn {{calibMode ? 'active' : ''}}" bindtap="toggleCalib">校准</view>
     <view class="grid-input">
       <text>列</text>
       <input type="number" value="{{gridCols}}" bindblur="onColsBlur" />
@@ -39,6 +38,21 @@
       <input type="number" value="{{gridRows}}" bindblur="onRowsBlur" />
     </view>
     <view class="tool-btn" bindtap="reExtract">重新取色</view>
+  </view>
+
+  <!-- 网格校准面板：网格线和图纸没对齐时微调 -->
+  <view class="calib-panel" wx:if="{{hasImage && calibMode}}">
+    <text class="calib-label">位置</text>
+    <view class="calib-btn" data-dx="-1" bindtap="nudge">←</view>
+    <view class="calib-btn" data-dx="1" bindtap="nudge">→</view>
+    <view class="calib-btn" data-dy="-1" bindtap="nudge">↑</view>
+    <view class="calib-btn" data-dy="1" bindtap="nudge">↓</view>
+    <text class="calib-label">格宽</text>
+    <view class="calib-btn" data-dw="-0.5" bindtap="nudge">−</view>
+    <view class="calib-btn" data-dw="0.5" bindtap="nudge">+</view>
+    <text class="calib-label">格高</text>
+    <view class="calib-btn" data-dh="-0.5" bindtap="nudge">−</view>
+    <view class="calib-btn" data-dh="0.5" bindtap="nudge">+</view>
   </view>
 
   <view class="info-bar" wx:if="{{hasImage}}">

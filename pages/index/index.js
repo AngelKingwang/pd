@@ -1,4 +1,4 @@
-const { detectGrid, extractColors } = require('../../utils/imageProcessor')
+const { detectGrid, gridBBox, extractColors } = require('../../utils/imageProcessor')
 
 const MAX_DIM = 1600 // 导入图片压缩上限，避免内存溢出
 const MIN_SCALE = 0.2
@@ -28,6 +28,7 @@ Page({
     palette: [],
     selectedColor: null,
     cropMode: false,
+    calibMode: false,
     gridCols: 0,
     gridRows: 0
   },
@@ -87,14 +88,8 @@ Page({
       const off = wx.createOffscreenCanvas({ type: '2d', width: w, height: h })
       const octx = off.getContext('2d')
       octx.drawImage(img, 0, 0, w, h)
-      this.img = off
-      this.imgW = w
-      this.imgH = h
-      this.imageData = octx.getImageData(0, 0, w, h)
-      this.setData({ hasImage: true, cropMode: false, selectedColor: null })
-      this.autoGrid()
-      this.fitView()
       wx.hideLoading()
+      this.setSource(off, true)
     }
     img.onerror = () => {
       wx.hideLoading()
@@ -103,11 +98,60 @@ Page({
     img.src = path
   },
 
+  /**
+   * 设置当前图纸图像
+   * @param off 离屏 canvas
+   * @param autoCrop 是否自动裁掉网格区域外的部分（四周数字、色卡标识）
+   */
+  setSource(off, autoCrop) {
+    this.img = off
+    this.imgW = off.width
+    this.imgH = off.height
+    this.imageData = off.getContext('2d').getImageData(0, 0, this.imgW, this.imgH)
+
+    let grid = detectGrid(this.imageData)
+
+    // 自动裁剪：只保留网格图纸区域，裁掉四周数字和色卡
+    if (grid && autoCrop) {
+      const box = gridBBox(grid, this.imgW, this.imgH)
+      const isWhole = box.x <= 0 && box.y <= 0 && box.w >= this.imgW && box.h >= this.imgH
+      if (!isWhole && box.w > 10 && box.h > 10) {
+        const cropped = wx.createOffscreenCanvas({ type: '2d', width: box.w, height: box.h })
+        const cctx = cropped.getContext('2d')
+        cctx.drawImage(this.img, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h)
+        this.img = cropped
+        this.imgW = box.w
+        this.imgH = box.h
+        this.imageData = cctx.getImageData(0, 0, box.w, box.h)
+        // 网格坐标换算到裁剪后的图片（只平移，格子索引不变，10格相位保持）
+        grid.offsetX -= box.x
+        grid.offsetY -= box.y
+        grid.cols = Math.max(1, Math.round((this.imgW - grid.offsetX) / grid.cellW))
+        grid.rows = Math.max(1, Math.round((this.imgH - grid.offsetY) / grid.cellH))
+      }
+    }
+
+    this.grid = grid || this.defaultGrid()
+    this.setData({
+      hasImage: true,
+      cropMode: false,
+      selectedColor: null,
+      gridCols: this.grid.cols,
+      gridRows: this.grid.rows
+    })
+    this.extract()
+    this.fitView()
+  },
+
   // ---------- 网格与取色 ----------
 
   autoGrid() {
     if (!this.imageData) return
-    const grid = detectGrid(this.imageData) || this.defaultGrid()
+    const grid = detectGrid(this.imageData)
+    if (!grid) {
+      wx.showToast({ title: '未检测到网格，请手动输入行列数', icon: 'none' })
+      return
+    }
     this.grid = grid
     this.setData({ gridCols: grid.cols, gridRows: grid.rows })
     this.extract()
@@ -152,6 +196,32 @@ Page({
   onRowsBlur(e) {
     this.setData({ gridRows: e.detail.value })
     this.applyGridFromInput()
+  },
+
+  // ---------- 网格校准（微调对齐，解决取色错位） ----------
+
+  toggleCalib() {
+    this.setData({ calibMode: !this.data.calibMode })
+  },
+
+  nudge(e) {
+    const g = this.grid
+    if (!g) return
+    const d = e.currentTarget.dataset
+    g.offsetX += Number(d.dx) || 0
+    g.offsetY += Number(d.dy) || 0
+    g.cellW = Math.max(2, g.cellW + (Number(d.dw) || 0))
+    g.cellH = Math.max(2, g.cellH + (Number(d.dh) || 0))
+    g.cols = Math.max(1, Math.round((this.imgW - g.offsetX) / g.cellW))
+    g.rows = Math.max(1, Math.round((this.imgH - g.offsetY) / g.cellH))
+    this.setData({ gridCols: g.cols, gridRows: g.rows })
+    this.render()
+    this.scheduleExtract()
+  },
+
+  scheduleExtract() {
+    clearTimeout(this._extractTimer)
+    this._extractTimer = setTimeout(() => this.extract(), 600)
   },
 
   reExtract() {
@@ -253,7 +323,7 @@ Page({
     this.cropDrag = null
   },
 
-  // ---------- 裁剪（裁掉色卡、边缘数字） ----------
+  // ---------- 裁剪（手动裁掉色卡、边缘数字） ----------
 
   toggleCrop() {
     if (!this.data.cropMode) {
@@ -315,6 +385,7 @@ Page({
       wx.showToast({ title: '裁剪区域太小', icon: 'none' })
       return
     }
+    const oldGrid = this.grid
     const off = wx.createOffscreenCanvas({ type: '2d', width: w, height: h })
     const octx = off.getContext('2d')
     octx.drawImage(this.img, x, y, w, h, 0, 0, w, h)
@@ -322,8 +393,22 @@ Page({
     this.imgW = w
     this.imgH = h
     this.imageData = octx.getImageData(0, 0, w, h)
-    this.setData({ cropMode: false })
-    this.autoGrid()
+
+    // 优先重新检测网格；检测不到则把旧网格平移过来，保持对齐
+    let grid = detectGrid(this.imageData)
+    if (!grid && oldGrid) {
+      grid = {
+        offsetX: oldGrid.offsetX - x,
+        offsetY: oldGrid.offsetY - y,
+        cellW: oldGrid.cellW,
+        cellH: oldGrid.cellH,
+        cols: Math.max(1, Math.round((w - (oldGrid.offsetX - x)) / oldGrid.cellW)),
+        rows: Math.max(1, Math.round((h - (oldGrid.offsetY - y)) / oldGrid.cellH))
+      }
+    }
+    this.grid = grid || this.defaultGrid()
+    this.setData({ cropMode: false, gridCols: this.grid.cols, gridRows: this.grid.rows })
+    this.extract()
     this.fitView()
   },
 
@@ -382,7 +467,7 @@ Page({
     }
   },
 
-  // 横竖每 10 格一条实线，中间第 5 格一条虚线
+  // 横竖每 10 格一条实线，中间第 5 格一条虚线（相位由图纸四周数字决定）
   drawGridLines(ctx) {
     const g = this.grid
     if (!g) return
